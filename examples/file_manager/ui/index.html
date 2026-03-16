@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Se-GO // CYBER_FILES_v1.0</title>
+    <style>
+        :root { --neon: #00ff41; --dim: #003b00; --bg: #050505; --alert: #ff003c; --accent: #00d4ff; }
+        * { box-sizing: border-box; outline: none; }
+        html, body { 
+            background: var(--bg); color: var(--neon); 
+            font-family: 'Terminus', 'Courier New', monospace; 
+            margin: 0; height: 100vh; overflow: hidden;
+            text-shadow: 0 0 5px var(--neon);
+            -webkit-user-select: none; user-select: none;
+        }
+
+        /* CRT Scanlines Overlay */
+        html::after {
+            content: ""; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%);
+            background-size: 100% 4px; z-index: 1000; pointer-events: none;
+        }
+
+        .layout { display: flex; flex-direction: column; height: 100vh; padding: 15px; gap: 10px; }
+        
+        /* Address Bar */
+        .address-bar {
+            border: 1px solid var(--neon); background: rgba(0, 255, 65, 0.05);
+            padding: 10px; display: flex; align-items: center; gap: 10px;
+            font-weight: bold; font-size: 14px;
+        }
+        .address-path { flex-grow: 1; color: var(--accent); overflow: hidden; text-overflow: ellipsis; }
+
+        /* Explorer Grid */
+        .explorer-panel { 
+            flex-grow: 1; border: 1px solid var(--neon); 
+            background: rgba(0, 255, 65, 0.02); overflow-y: auto; position: relative;
+        }
+        .file-list { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .file-list th { 
+            position: sticky; top: 0; background: var(--dim); color: var(--neon);
+            text-align: left; padding: 10px; z-index: 20; font-size: 11px;
+        }
+        .file-list td { padding: 8px 10px; border-bottom: 1px solid rgba(0, 255, 65, 0.05); cursor: pointer; }
+        
+        .file-row { transition: 0.1s; }
+        .file-row:hover { background: rgba(0, 255, 65, 0.1); }
+        .file-row.selected { background: var(--neon) !important; color: var(--bg) !important; text-shadow: none; }
+        
+        .icon { margin-right: 10px; }
+        .dir { color: var(--accent); font-weight: bold; }
+
+        /* Custom Context Menu */
+        #context-menu {
+            position: fixed; z-index: 10000; background: var(--bg);
+            border: 1px solid var(--neon); box-shadow: 0 0 15px var(--neon);
+            display: none; min-width: 200px; padding: 5px 0;
+        }
+        .menu-item {
+            padding: 10px 15px; cursor: pointer; font-size: 12px; transition: 0.1s;
+            display: flex; justify-content: space-between;
+        }
+        .menu-item:hover { background: var(--neon); color: var(--bg); text-shadow: none; }
+        .menu-item.danger:hover { background: var(--alert); color: #fff; }
+        .menu-divider { border-bottom: 1px solid var(--dim); margin: 5px 0; }
+
+        /* Footer */
+        .status-bar { font-size: 10px; color: #888; display: flex; justify-content: space-between; padding: 5px; }
+        .pulse { animation: blink 0.8s infinite; color: var(--accent); }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    </style>
+</head>
+<body oncontextmenu="return false;">
+
+<div class="layout">
+    <div class="address-bar">
+        <span>LOC:</span>
+        <div class="address-path" id="currentPath">/</div>
+        <span class="pulse">●</span>
+    </div>
+
+    <div class="explorer-panel" id="mainPanel">
+        <table class="file-list">
+            <thead>
+                <tr>
+                    <th style="width: 70%;">OBJECT_NAME</th>
+                    <th>STATUS</th>
+                </tr>
+            </thead>
+            <tbody id="fileBody">
+                </tbody>
+        </table>
+    </div>
+
+    <div class="status-bar">
+        <span id="itemCount">0 ITEMS</span>
+        <span id="clipboardStatus">CLIPBOARD: NULL</span>
+    </div>
+</div>
+
+<div id="context-menu">
+    <div class="menu-item" onclick="openItem()">ENTER_DIR</div>
+    <div class="menu-divider"></div>
+    <div class="menu-item" onclick="copyItem()">COPY_OBJECT</div>
+    <div class="menu-item" id="pasteBtn" onclick="pasteItem()" style="display:none">PASTE_OBJECT</div>
+    <div class="menu-divider"></div>
+    <div class="menu-item danger" onclick="deleteItem()">TERMINATE_OBJECT (DEL)</div>
+</div>
+
+<script>
+    let currentDir = "";
+    let selectedItem = null;
+    let clipboard = { path: null, name: null };
+
+    const fileBody = document.getElementById('fileBody');
+    const menu = document.getElementById('context-menu');
+    const pathLabel = document.getElementById('currentPath');
+
+    async function call(cmd, args) {
+        try {
+            const res = await fetch('/api/run', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({cmd, args})
+            });
+            return await res.json();
+        } catch(e) { return {error: e.message}; }
+    }
+
+    async function loadDir(path = ".") {
+        if (path === ".") {
+            const pwd = await call('pwd', []);
+            currentDir = pwd.output.trim();
+        } else {
+            currentDir = path;
+        }
+        
+        pathLabel.textContent = currentDir;
+        
+        // Получаем список: -a (все), -p (метки папок /), --group-directories-first
+        const res = await call('ls', ['-ap', '--group-directories-first', currentDir]);
+        if (res.error) {
+            alert("FS_ERROR: " + res.error);
+            return;
+        }
+
+        const files = res.output.trim().split('\n').filter(f => f && f !== './');
+        fileBody.innerHTML = '';
+        
+        // Кнопка назад (если не корень)
+        if (currentDir !== '/') {
+            addFileRow('..', true);
+        }
+
+        files.forEach(file => {
+            if(file === '../') return;
+            const isDir = file.endsWith('/');
+            addFileRow(isDir ? file.slice(0, -1) : file, isDir);
+        });
+
+        document.getElementById('itemCount').textContent = files.length + " ITEMS_DETECTED";
+        selectedItem = null;
+    }
+
+    function addFileRow(name, isDir) {
+        const tr = document.createElement('tr');
+        tr.className = 'file-row';
+        tr.dataset.name = name;
+        tr.dataset.isDir = isDir;
+        
+        tr.innerHTML = `
+            <td class="${isDir ? 'dir' : ''}">
+                <span class="icon">${isDir ? '📁' : '📄'}</span>${name}
+            </td>
+            <td>${isDir ? 'DIRECTORY' : 'FILE'}</td>
+        `;
+        
+        tr.onclick = (e) => { e.stopPropagation(); selectItem(tr); };
+        tr.ondblclick = () => { if(isDir) navigate(name); };
+        fileBody.appendChild(tr);
+    }
+
+    function selectItem(row) {
+        document.querySelectorAll('.file-row').forEach(r => r.classList.remove('selected'));
+        row.classList.add('selected');
+        selectedItem = {
+            name: row.dataset.name,
+            isDir: row.dataset.isDir === 'true',
+            path: (currentDir === '/' ? '' : currentDir) + '/' + row.dataset.name
+        };
+        menu.style.display = 'none';
+    }
+
+    function navigate(dirName) {
+        let newPath;
+        if (dirName === '..') {
+            newPath = currentDir.substring(0, currentDir.lastIndexOf('/')) || '/';
+        } else {
+            newPath = (currentDir === '/' ? '' : currentDir) + '/' + dirName;
+        }
+        loadDir(newPath);
+    }
+
+    // CONTEXT MENU LOGIC
+    window.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        const row = e.target.closest('.file-row');
+        if (row) {
+            selectItem(row);
+        } else {
+            document.querySelectorAll('.file-row').forEach(r => r.classList.remove('selected'));
+            selectedItem = null;
+        }
+
+        menu.style.display = 'block';
+        menu.style.left = e.pageX + 'px';
+        menu.style.top = e.pageY + 'px';
+        
+        document.getElementById('pasteBtn').style.display = clipboard.path ? 'flex' : 'none';
+    });
+
+    window.onclick = () => menu.style.display = 'none';
+
+    // ACTIONS
+    function openItem() {
+        if (selectedItem && selectedItem.isDir) navigate(selectedItem.name);
+    }
+
+    function copyItem() {
+        if (!selectedItem) return;
+        clipboard = { path: selectedItem.path, name: selectedItem.name };
+        document.getElementById('clipboardStatus').textContent = "CLIPBOARD: " + selectedItem.name;
+    }
+
+    async function pasteItem() {
+        if (!clipboard.path) return;
+        const dest = (currentDir === '/' ? '' : currentDir) + '/' + clipboard.name;
+        // Копируем рекурсивно
+        await call('cp', ['-r', clipboard.path, dest]);
+        loadDir(currentDir);
+    }
+
+    async function deleteItem() {
+        if (!selectedItem || selectedItem.name === '..') return;
+        if (confirm(`DELETE PERMANENTLY: ${selectedItem.name}?`)) {
+            await call('rm', ['-rf', selectedItem.path]);
+            loadDir(currentDir);
+        }
+    }
+
+    // KEYBOARD COMMANDS
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') openItem();
+        if (e.key === 'Delete') deleteItem();
+        if (e.ctrlKey && e.key === 'c') copyItem();
+        if (e.ctrlKey && e.key === 'v') pasteItem();
+    });
+
+    loadDir();
+</script>
+</body>
+</html>
